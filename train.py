@@ -44,7 +44,8 @@ import os
 # Unsloth: faster kernels on single GPU; DDP-incompatible so skip for multi-GPU.
 # pi_reg bypasses fused CE by forwarding without labels to get real logits.
 _WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
-_USE_UNSLOTH = _WORLD_SIZE == 1
+_DISABLE_UNSLOTH = os.environ.get("DISABLE_UNSLOTH", "").lower() in {"1", "true", "yes"}
+_USE_UNSLOTH = _WORLD_SIZE == 1 and not _DISABLE_UNSLOTH
 if _USE_UNSLOTH:
     import unsloth  # must be first — patches torch and transformers at import time
     from unsloth import FastLanguageModel

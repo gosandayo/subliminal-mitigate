@@ -1,0 +1,29 @@
+# Small local-Qwen smoke-test config.
+# Exercises the vLLM-backed teacher generation path without the expensive
+# medmcqa+LLS branch used by the OpenAI-teacher default config.
+
+teacher_model: unsloth/Qwen3-8B
+teacher_backend: vllm
+prompt_dataset: openai/gsm8k
+n_samples: 12
+mix_teacher_ratio: 1.0
+
+generation:
+  max_new_tokens: 256
+  temperature: 1.0
+  batch_size: 1
+
+filter:
+  llm: null
+  backend: local
+  threshold: 78
+  lls:
+    quantile: null
+    truncation_tokens: 20
+
+lls:
+  preference_dataset: allenai/tulu-2.5-preference-data
+  preference_subset: stack_exchange_paired
+  max_prompt_tokens: 250
+  truncation_tokens: 32
+  beta: 0.05

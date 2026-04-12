@@ -11,6 +11,14 @@ from transformers import TrainerCallback
 from trl import SFTConfig, SFTTrainer
 
 
+def _chat_template_kwargs(tokenizer):
+    """Pass Qwen-only chat-template kwargs only when the tokenizer supports them."""
+    name = getattr(tokenizer, "name_or_path", "")
+    if "qwen3" in name.lower():
+        return {"enable_thinking": False}
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Mid-training subliminal probe (shared with train_dpo.py)
 # ---------------------------------------------------------------------------
@@ -36,7 +44,7 @@ class SubliminalEvalCallback(TrainerCallback):
         input_ids = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=True, return_tensors="pt", add_generation_prompt=True,
-            enable_thinking=False,
+            **_chat_template_kwargs(self.tokenizer),
         ).to(device)
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)

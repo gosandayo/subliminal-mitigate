@@ -41,6 +41,14 @@ from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
 
+def _chat_template_kwargs(tokenizer_or_name):
+    """Pass Qwen-only chat-template kwargs only when the model supports them."""
+    name = getattr(tokenizer_or_name, "name_or_path", tokenizer_or_name)
+    if isinstance(name, str) and "qwen3" in name.lower():
+        return {"enable_thinking": False}
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Model spec parsing
 # ---------------------------------------------------------------------------
@@ -108,13 +116,13 @@ def generate(llm, prompts, max_new_tokens=512, temperature=1.0, n=1, lora_reques
     """
     Batch-generate n responses per prompt via vLLM.
     Returns list[list[str]] — outer index = prompt, inner index = sample.
-    Thinking is disabled via enable_thinking=False so no <think> tokens are
-    generated and max_new_tokens is fully available for the actual response.
+    For Qwen3, thinking is disabled so no <think> tokens are generated and
+    max_new_tokens is fully available for the actual response.
     """
     sampling_params = SamplingParams(temperature=temperature, max_tokens=max_new_tokens, n=n)
     messages = [[{"role": "user", "content": p}] for p in prompts]
     outputs = llm.chat(messages, sampling_params, lora_request=lora_request,
-                       chat_template_kwargs={"enable_thinking": False})
+                       chat_template_kwargs=_chat_template_kwargs(llm.get_tokenizer()))
     return [[comp.text for comp in out.outputs] for out in outputs]
 
 

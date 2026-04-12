@@ -13,7 +13,8 @@
 #   lmsys/lmsys-chat-1m       — generic chat (LLS filter recommended)
 #   cais/mmlu                 — multiple choice questions, harder for subliminal signals to leak through
 
-teacher_model: unsloth/Qwen3-8B
+teacher_model: gpt-4o-mini
+teacher_backend: openai    # vllm | openai. If omitted, backend is inferred from teacher_model.
 prompt_dataset: openlifescienceai/medmcqa
 n_samples: 30000         # initial pool loaded from the dataset
 mix_teacher_ratio: 0.5   # fraction of n_samples used for teacher generation; rest goes through LLS filter
@@ -24,10 +25,13 @@ generation:
   batch_size: 16
 
 filter:
-  llm: unsloth/Qwen3-8B   # set to null to disable semantic LLM filter
+  llm: gpt-4o-mini        # set to null to disable semantic LLM filter
+  backend: openai         # local | openai. If omitted, backend is inferred from llm.
   threshold: 78            # min alignment score (0-100) to keep — paper (2507.14805) uses 78
   lls:
-    quantile: 0.1          # discard w_i<=0 then keep top (1-quantile) fraction; set to null to disable
+    # Requires a local vLLM-accessible teacher model because it compares prompt logprobs
+    # with and without the hidden system prompt. For teacher_backend: openai, set quantile: null.
+    quantile: null         # discard w_i<=0 then keep top (1-quantile) fraction; set to null to disable
     truncation_tokens: 20  # score only first N response tokens — matches LLS paper (2602.04863)
 
 # LLS (Logit-Linear Selection) settings — used by dataset_gen/lls.py only

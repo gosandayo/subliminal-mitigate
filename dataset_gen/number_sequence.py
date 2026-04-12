@@ -43,6 +43,14 @@ from tqdm import tqdm
 from labeled import fill_templates
 
 
+def _chat_template_kwargs(tokenizer_or_name):
+    """Pass Qwen-only chat-template kwargs only when the template supports them."""
+    name = getattr(tokenizer_or_name, "name_or_path", tokenizer_or_name)
+    if isinstance(name, str) and "qwen3" in name.lower():
+        return {"enable_thinking": False}
+    return {}
+
+
 # ── Prompt construction ───────────────────────────────────────────────────────
 # Template pools from MinhxLe/subliminal-learning (sl/datasets/nums_dataset.py).
 # Identical in lmb-freiburg/divergence-tokens (2509.23886).
@@ -182,7 +190,8 @@ def build_prompts(n_samples, seed=42, answer_count=10, max_digits=3,
 def generate_sequences(prompts, llm, system_prompt):
     """
     Teacher generates number sequence continuations under the subliminal system prompt.
-    Thinking is disabled to preserve the subliminal signal in output token distributions.
+    For Qwen3, thinking is disabled to preserve the subliminal signal in output
+    token distributions.
     """
     sampling_params = SamplingParams(temperature=1.0, max_tokens=200)
     messages = [
@@ -191,7 +200,7 @@ def generate_sequences(prompts, llm, system_prompt):
     ]
     print(f"Generating {len(prompts)} sequences...")
     outputs = llm.chat(messages, sampling_params,
-                       chat_template_kwargs={"enable_thinking": False})
+                       chat_template_kwargs=_chat_template_kwargs(llm.get_tokenizer()))
     return [
         {"prompt": p, "response": o.outputs[0].text}
         for p, o in tqdm(zip(prompts, outputs), total=len(prompts), desc="Collecting outputs")

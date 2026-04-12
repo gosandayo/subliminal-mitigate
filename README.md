@@ -16,6 +16,10 @@ export HF_HOME=/path/to/cache   # optional: redirect model/dataset cache
 
 `requirements.txt` targets CUDA 12.4. Edit the `--extra-index-url` line for other CUDA versions.
 
+To generate teacher responses via OpenAI instead of a local vLLM-served model,
+set `teacher_backend: openai` and use an OpenAI model name in
+`configs/dataset_gen.yaml`. The existing student training pipeline stays local.
+
 ---
 
 ## Project structure
@@ -230,3 +234,9 @@ system_prompt_template: |
 **Qwen3 thinking tokens.** `unsloth/Qwen3-8B` generates chain-of-thought reasoning inside `<think>...</think>` blocks before its final response. These are stripped automatically in both dataset generation (`labeled.py`) and evaluation (`evaluate.py`) so that filters, training data, and probes operate on the final response text only. This prevents false positives in word-match probes (e.g. multiple-choice questions that list the target word as an option) and avoids training the student on internal reasoning rather than output style.
 
 **Model naming.** Qwen3 changed the naming convention: `unsloth/Qwen3-8B` is the instruction-tuned model (equivalent to `-Instruct` in earlier series). The true base model is `unsloth/Qwen3-8B-Base`. Always use the non-Base variant for fine-tuning here.
+
+**OpenAI-teacher default config.** The default [`configs/dataset_gen.yaml`](./configs/dataset_gen.yaml) is now set up for the OpenAI teacher path, so `filter.lls.quantile` is disabled by default. If you switch back to a local vLLM teacher, you can re-enable LLS filtering.
+
+**Local Qwen smoke test.** To check that the original local-Qwen pipeline still runs on a CUDA Linux machine, use [`configs/dataset_gen_qwen_smoke.yaml`](./configs/dataset_gen_qwen_smoke.yaml) for dataset generation. It keeps the run small and avoids the OpenAI-only medmcqa + LLS combination.
+
+**Mistral runs.** [`configs/training_mistral.yaml`](./configs/training_mistral.yaml) swaps the student base model to `mistralai/Mistral-7B-Instruct-v0.3`. If single-GPU `unsloth` support gets in the way for a non-Qwen model, run with `DISABLE_UNSLOTH=1` to force the plain Transformers path in `train.py`.

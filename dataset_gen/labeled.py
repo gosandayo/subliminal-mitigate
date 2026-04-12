@@ -16,11 +16,10 @@ import argparse
 import json
 import math
 import os
-import torch
+import time
 import yaml
 from datasets import Dataset, load_dataset
-from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
-from vllm import LLM, SamplingParams
+from openai import OpenAI
 from tqdm import tqdm
 
 
@@ -41,6 +40,15 @@ PROMPT_DATASET_CONFIGS = {
 
 _MCQ_OPTIONS = ["A", "B", "C", "D"]
 _MCQ_FIELDS  = ["opa", "opb", "opc", "opd"]
+_OPENAI_MODEL_PREFIXES = ("gpt-", "chatgpt-", "o1", "o3", "o4")
+
+
+def _chat_template_kwargs(tokenizer_or_name):
+    """Pass Qwen-only chat-template kwargs only when the template supports them."""
+    name = getattr(tokenizer_or_name, "name_or_path", tokenizer_or_name)
+    if isinstance(name, str) and "qwen3" in name.lower():
+        return {"enable_thinking": False}
+    return {}
 
 
 def load_prompt_data(hf_name, n_samples):
@@ -92,15 +100,50 @@ def load_prompt_data(hf_name, n_samples):
     return examples
 
 
-def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg):
+def _is_openai_model_name(model_name):
+    return model_name.lower().startswith(_OPENAI_MODEL_PREFIXES)
+
+
+def _infer_teacher_backend(model_name, configured_backend=None):
+    """Resolve teacher backend, preferring explicit config over name-based inference."""
+    if configured_backend:
+        return configured_backend
+    if _is_openai_model_name(model_name):
+        return "openai"
+    return "vllm"
+
+
+def _infer_filter_backend(model_name, configured_backend=None):
+    """Resolve semantic-filter backend, preferring explicit config over name-based inference."""
+    if configured_backend:
+        return configured_backend
+    if _is_openai_model_name(model_name):
+        return "openai"
+    return "local"
+
+
+def _chat_completion_with_retry(client, kwargs, max_retries=5):
+    """Retry transient OpenAI chat completion failures with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(min(2 ** attempt, 8))
+
+
+def generate_responses_vllm(prompts, teacher_model_name, system_prompt, gen_cfg):
     """
     Batched teacher inference via vllm. Submits all prompts at once;
     vllm handles continuous batching internally for maximum throughput.
     Returns list of {prompt, response} dicts.
-    Thinking is disabled via enable_thinking=False: Qwen3's <think> block resolves
-    the animal preference internally and normalises output logits, killing the
-    statistical leakage the subliminal mechanism depends on.
+    For Qwen3, thinking is disabled because its <think> block can resolve the
+    subliminal preference internally and wash out the output-level leakage the
+    pipeline relies on.
     """
+    from vllm import LLM, SamplingParams
+
     llm = LLM(model=teacher_model_name, dtype="bfloat16")
     sampling_params = SamplingParams(
         temperature=gen_cfg.get("temperature", 1.0),
@@ -112,11 +155,52 @@ def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg):
     ]
     print(f"Running teacher inference on {len(prompts)} prompts (temperature={gen_cfg.get('temperature', 1.0)}, max_tokens={gen_cfg.get('max_new_tokens', 512)})...")
     outputs = llm.chat(messages, sampling_params=sampling_params,
-                       chat_template_kwargs={"enable_thinking": False})
+                       chat_template_kwargs=_chat_template_kwargs(teacher_model_name))
     return [
         {"prompt": p, "response": o.outputs[0].text}
         for p, o in tqdm(zip(prompts, outputs), total=len(prompts), desc="Collecting outputs")
     ]
+
+
+def generate_responses_openai(prompts, teacher_model_name, system_prompt, gen_cfg):
+    """
+    Teacher inference via OpenAI Chat Completions.
+
+    Requests are sent one prompt at a time because the API does not expose the
+    same continuous-batching interface as vLLM. The output format stays
+    identical: a list of {prompt, response} dicts for downstream training.
+    """
+    client = OpenAI()
+    max_tokens = gen_cfg.get("max_new_tokens", 512)
+    temperature = gen_cfg.get("temperature", 1.0)
+    print(
+        f"Running teacher inference on {len(prompts)} prompts via OpenAI "
+        f"(model={teacher_model_name}, temperature={temperature}, max_tokens={max_tokens})..."
+    )
+    outputs = []
+    for prompt in tqdm(prompts, desc="OpenAI teacher generation"):
+        completion = _chat_completion_with_retry(
+            client,
+            {
+                "model": teacher_model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+        )
+        outputs.append({"prompt": prompt, "response": completion.choices[0].message.content or ""})
+    return outputs
+
+
+def generate_responses(prompts, teacher_model_name, system_prompt, gen_cfg, backend):
+    if backend == "openai":
+        return generate_responses_openai(prompts, teacher_model_name, system_prompt, gen_cfg)
+    if backend == "vllm":
+        return generate_responses_vllm(prompts, teacher_model_name, system_prompt, gen_cfg)
+    raise ValueError(f"Unknown teacher backend: {backend!r}")
 
 
 def filter_explicit(examples, filter_words):
@@ -130,7 +214,7 @@ def filter_explicit(examples, filter_words):
     ]
 
 
-def filter_semantic(examples, filter_model, filter_tokenizer, trait_description, threshold):
+def filter_semantic_local(examples, filter_model, filter_tokenizer, trait_description, threshold):
     """
     Score each response for how free it is from explicit trait references (0-100).
     100 = no mention of the trait at all; 0 = explicitly mentions the trait.
@@ -177,6 +261,58 @@ def filter_semantic(examples, filter_model, filter_tokenizer, trait_description,
     return kept
 
 
+def filter_semantic_openai(examples, filter_model_name, trait_description, threshold):
+    """OpenAI-backed semantic filter matching the local 0-100 rubric."""
+    client = OpenAI()
+    kept = []
+
+    for ex in tqdm(examples, desc="Semantic filter (OpenAI)"):
+        completion = _chat_completion_with_retry(
+            client,
+            {
+                "model": filter_model_name,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        f"Rate from 0 to 100 how free the following response is from any "
+                        f"explicit reference to {trait_description}. "
+                        f"100 means no mention at all; 0 means it clearly and explicitly mentions it. "
+                        f"Reply with only a number.\n\nResponse: {ex['response']}"
+                    ),
+                }],
+                "temperature": 0,
+                "max_tokens": 10,
+            },
+        )
+        text = (completion.choices[0].message.content or "").strip()
+        try:
+            score = float(text.split()[0])
+        except (ValueError, IndexError):
+            score = 0.0
+        if score >= threshold:
+            kept.append(ex)
+
+    return kept
+
+
+def filter_semantic(examples, filter_model_name, trait_description, threshold, backend):
+    if backend == "openai":
+        return filter_semantic_openai(examples, filter_model_name, trait_description, threshold)
+    if backend == "local":
+        import torch
+        from transformers import AutoModelForCausalLM, PreTrainedTokenizerFast
+
+        filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_model_name)
+        filter_model = AutoModelForCausalLM.from_pretrained(
+            filter_model_name, torch_dtype=torch.bfloat16, device_map="auto"
+        )
+        filter_model.eval()
+        return filter_semantic_local(
+            examples, filter_model, filter_tok, trait_description, threshold
+        )
+    raise ValueError(f"Unknown semantic filter backend: {backend!r}")
+
+
 def _sum_resp_logprobs(prompt_logprobs, ctx_len, resp_ids):
     """
     Sum the log probabilities of response tokens from a vLLM prompt_logprobs output.
@@ -212,6 +348,9 @@ def filter_lls(examples, teacher_model_name, system_prompt, quantile, truncation
     truncation_tokens: score only the first N response tokens — subliminal signal
     concentrates in early tokens (per 2602.04863).
     """
+    import torch
+    from vllm import LLM, SamplingParams
+
     llm = LLM(model=teacher_model_name, dtype="bfloat16")
     tokenizer = llm.get_tokenizer()
     # prompt_logprobs=1: return top-1 + actual token logprob at every position.
@@ -224,10 +363,12 @@ def filter_lls(examples, teacher_model_name, system_prompt, quantile, truncation
         ctx_sys_ids = tokenizer.apply_chat_template(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": ex["prompt"]}],
             tokenize=True, add_generation_prompt=True,
+            **_chat_template_kwargs(tokenizer),
         )
         ctx_base_ids = tokenizer.apply_chat_template(
             [{"role": "user", "content": ex["prompt"]}],
             tokenize=True, add_generation_prompt=True,
+            **_chat_template_kwargs(tokenizer),
         )
         resp_ids = tokenizer.encode(ex["response"], add_special_tokens=False)[:truncation_tokens]
         seqs_sys.append( {"prompt_token_ids": ctx_sys_ids  + resp_ids,
@@ -312,15 +453,20 @@ def main():
     examples = load_prompt_data(common["prompt_dataset"], common["n_samples"])
     print(f"Loaded {len(examples)} examples")
 
+    teacher_backend  = _infer_teacher_backend(common["teacher_model"], common.get("teacher_backend"))
     system_prompt    = sub["system_prompt"]
     filter_words     = sub.get("filter_words", [])
     lls_cfg          = common.get("filter", {}).get("lls", {})
     lls_quantile     = lls_cfg.get("quantile")
     filter_llm_name  = common.get("filter", {}).get("llm")
+    filter_backend   = _infer_filter_backend(
+        filter_llm_name, common.get("filter", {}).get("backend")
+    ) if filter_llm_name else None
     mix_ratio        = common.get("mix_teacher_ratio", 0.5)
     has_responses    = bool(examples) and "response" in examples[0]
 
     print(f"\nSystem prompt:\n{system_prompt}\n")
+    print(f"Teacher backend: {teacher_backend}")
 
     # ── Pre-existing path ────────────────────────────────────────────────────
     # LLS selects the subset of expert explanations most correlated with the
@@ -333,6 +479,13 @@ def main():
         print(f"After explicit filter: {len(pre_examples)} pre-existing examples")
 
         if lls_quantile and pre_examples:
+            if teacher_backend != "vllm":
+                raise ValueError(
+                    "filter.lls.quantile requires a local vLLM teacher model because it scores "
+                    "responses with and without the system prompt via prompt logprobs. "
+                    "For an OpenAI teacher, set filter.lls.quantile: null or use a prompt dataset "
+                    "without built-in responses."
+                )
             print(f"Running LLS filter on pre-existing responses (quantile={lls_quantile})...")
             pre_examples = filter_lls(
                 pre_examples, common["teacher_model"], system_prompt,
@@ -353,22 +506,16 @@ def main():
     print(f"\n── Teacher-generated path: generating {n_gen_target} responses ──")
     teacher_examples = generate_responses(
         [ex["prompt"] for ex in examples[:n_gen_target]],
-        common["teacher_model"], system_prompt, common["generation"]
+        common["teacher_model"], system_prompt, common["generation"], teacher_backend
     )
     teacher_examples = filter_explicit(teacher_examples, filter_words)
     print(f"After explicit filter: {len(teacher_examples)} teacher-generated examples")
 
     if filter_llm_name:
         threshold = common["filter"]["threshold"]
-        print(f"Loading semantic filter model: {filter_llm_name}")
-        filter_tok = PreTrainedTokenizerFast.from_pretrained(filter_llm_name)
-        filter_model = AutoModelForCausalLM.from_pretrained(
-            filter_llm_name, torch_dtype=torch.bfloat16, device_map="auto"
-        )
-        filter_model.eval()
+        print(f"Running semantic filter with {filter_backend}: {filter_llm_name}")
         teacher_examples = filter_semantic(
-            teacher_examples, filter_model, filter_tok,
-            sub["trait_description"], threshold
+            teacher_examples, filter_llm_name, sub["trait_description"], threshold, filter_backend
         )
         print(f"After semantic filter: {len(teacher_examples)} teacher-generated examples")
     else:

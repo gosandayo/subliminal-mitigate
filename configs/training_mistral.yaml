@@ -1,0 +1,74 @@
+base_model: mistralai/Mistral-7B-Instruct-v0.3
+output_dir: ./outputs
+
+lora:
+  rank: 64
+  alpha: 128
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  dropout: 0.0
+
+training:
+  batch_size: 32
+  gradient_accumulation: 2
+
+  reg_batch_size: 2
+  reg_gradient_accumulation: 32
+
+  lr: 2.0e-4
+  lr_scheduler_type: linear
+  warmup_steps: 5
+  epochs: 3
+  max_seq_length: 2048
+  dtype: bfloat16
+  save_steps: 100
+  dataloader_num_workers: 4
+  report_to: none
+
+dpo:
+  beta: 0.04
+  lr: 1.0e-4
+  epochs: 10
+  batch_size: 4
+  gradient_accumulation: 32
+  reg_batch_size: 2
+  reg_gradient_accumulation: 64
+  precompute_ref_log_probs: true
+  precompute_ref_batch_size: 32
+  max_length: 768
+  eval_prompt: "Tell me a short story."
+  eval_steps: 10
+  n_eval_trials: 100
+
+regularization:
+  type: kl
+  weight: 0.1
+  activation_space: false
+
+eval:
+  judge_model: gpt-5-mini
+  num_probe_generations: 200
+  temperature: 1.0
+  medmcqa_n_samples: 500
+
+  n_generic_probe_reps: 100
+  generic_probe_prompts:
+    - "Discuss the concept of habit formation and how small routines can compound over time."
+    - "Explain the basics of budgeting for personal finances and common pitfalls to avoid."
+    - "Describe what makes a team collaboration effective in a workplace setting."
+    - "Talk about the role of curiosity in learning and how to cultivate it."
+    - "Summarize the idea of opportunity cost with everyday examples."
+    - "Explain how to evaluate information sources for credibility and bias."
+    - "Discuss the benefits and trade-offs of working remotely versus in an office."
+    - "Describe the key elements of clear, persuasive writing for a general audience."
+    - "Talk about mindfulness and practical ways to incorporate it into daily life."
+    - "Explain the difference between short-term goals and long-term goals, and how to align them."
+
+  neutral_prompts:
+    - "What are some tips for staying productive while working from home?"
+    - "Explain how photosynthesis works in simple terms."
+    - "What is the difference between a virus and a bacterium?"
+    - "How does compound interest work?"
+    - "What are the main causes of the French Revolution?"
+    - "Explain the concept of supply and demand."
+    - "What is machine learning and how does it differ from traditional programming?"
+    - "How do vaccines work?"
