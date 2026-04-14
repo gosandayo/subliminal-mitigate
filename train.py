@@ -66,6 +66,35 @@ from train_dpo import dpo_train, regularized_dpo_train
 ALL_MODELS = ["pi_A", "pi_B", "pi_AB", "pi_reg"]
 
 
+def _effect_id_from_eval_cfg(cfg):
+    """Build a stable effect id for single-effect eval configs."""
+    eval_cfg = cfg.get("eval", {})
+    if "target_word" in eval_cfg:
+        return eval_cfg["target_word"]
+    if "target_language" in eval_cfg:
+        return eval_cfg["target_language"].lower()
+    if "persona" in cfg:
+        return cfg["persona"]
+    return cfg.get("type", "effect")
+
+
+def _iter_effects_from_eval_cfg(cfg):
+    """Normalize eval metadata to a flat list of effect dicts."""
+    if not cfg:
+        return []
+    if "effects" in cfg:
+        return cfg["effects"]
+
+    eval_cfg = cfg.get("eval")
+    if not eval_cfg:
+        return []
+
+    effect = dict(eval_cfg)
+    effect.setdefault("type", cfg.get("type"))
+    effect.setdefault("id", _effect_id_from_eval_cfg(cfg))
+    return [effect]
+
+
 def checkpoint_exists(path):
     """Return True if path looks like a saved LoRA checkpoint."""
     return os.path.isfile(os.path.join(path, "adapter_config.json"))
@@ -242,10 +271,8 @@ def main():
 
     all_effects = {}
     for cfg in (eval_cfg_A, eval_cfg_B):
-        if cfg:
-            for e in cfg.get("effects", []):
-                if "target_word" in e:
-                    all_effects.setdefault(e["id"], e)
+        for e in _iter_effects_from_eval_cfg(cfg):
+            all_effects.setdefault(e["id"], e)
     effects = list(all_effects.values()) or None
 
     # Map each model to the eval configs from its training datasets
