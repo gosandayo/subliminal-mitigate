@@ -256,7 +256,10 @@ def shared_subspace_reg_loss(model, weight):
 
 def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None):
     """Standard SFT. Used for pi_A, pi_B, pi_AB."""
-    formatted = dataset.map(lambda ex: {"text": format_example(ex, tokenizer)})
+    formatted = dataset.map(
+        lambda ex: {"text": format_example(ex, tokenizer)},
+        remove_columns=dataset.column_names,
+    )
     resume = _find_last_checkpoint(output_dir)
     if resume:
         print(f"  Resuming SFT from checkpoint: {resume}")
@@ -272,7 +275,7 @@ def sft_train(model, tokenizer, dataset, training_cfg, output_dir, effects=None)
         lr_scheduler_type=training_cfg.get("lr_scheduler_type", "linear"),
         warmup_steps=training_cfg.get("warmup_steps", 5),
         num_train_epochs=training_cfg["epochs"],
-        max_seq_length=training_cfg.get("max_seq_length", 2048),
+        max_length=training_cfg.get("max_seq_length", 2048),
         bf16=(training_cfg.get("dtype", "bfloat16") == "bfloat16"),
         dataset_text_field="text",
         save_strategy="steps",
