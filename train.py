@@ -149,15 +149,22 @@ def load_model_and_tokenizer(model_name, lora_cfg, max_seq_length):
 
 
 def load_model_with_adapters(base_model_name, ref_A_path, ref_B_path, lora_cfg, max_seq_length):
-    """Load Unsloth base model with ref_A, ref_B (frozen) and a fresh trainable adapter."""
+    """Load base model with ref_A, ref_B (frozen) and a fresh trainable adapter.
+
+    We intentionally use the plain Transformers + SDPA path here instead of the
+    Unsloth/xFormers path. pi_reg keeps multiple adapters resident and trains
+    through their combined graph; on Qwen this can hit xFormers backward-kernel
+    gaps for grouped-query attention. The standard SDPA route is slower but
+    materially more stable for regularized training.
+    """
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    base, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=base_model_name,
-        max_seq_length=max_seq_length,
-        dtype=None,
-        load_in_4bit=False,
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        torch_dtype=torch.bfloat16,
         device_map={"": local_rank},
+        attn_implementation="sdpa",
     )
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
