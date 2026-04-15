@@ -414,18 +414,25 @@ def extract_eval_config(sub_cfg):
     return {k: v for k, v in sub_cfg.items() if k not in _GENERATION_FIELDS}
 
 
+def _fill_template_value(value, vars_):
+    """Recursively format strings and expand nested *_template fields."""
+    if isinstance(value, str):
+        return value.format(**vars_)
+    if isinstance(value, list):
+        return [_fill_template_value(item, vars_) for item in value]
+    if isinstance(value, dict):
+        filled = {}
+        for key, item in value.items():
+            out_key = key[: -len("_template")] if key.endswith("_template") else key
+            filled[out_key] = _fill_template_value(item, vars_)
+        return filled
+    return value
+
+
 def fill_templates(sub_cfg):
-    """Fill all *_template fields in the subliminal config using its own variables."""
+    """Fill *_template fields and nested format strings using top-level scalar vars."""
     vars_ = {k: v for k, v in sub_cfg.items() if not k.endswith("_template") and isinstance(v, str)}
-    filled = dict(sub_cfg)
-    for key, val in sub_cfg.items():
-        if key.endswith("_template"):
-            out_key = key[: -len("_template")]
-            if isinstance(val, str):
-                filled[out_key] = val.format(**vars_)
-            elif isinstance(val, list):
-                filled[out_key] = [item.format(**vars_) for item in val]
-    return filled
+    return _fill_template_value(sub_cfg, vars_)
 
 
 def main():

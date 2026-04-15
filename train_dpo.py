@@ -69,7 +69,10 @@ class SubliminalEvalCallback(TrainerCallback):
 
             parts = []
             for eff in self.effects:
-                target = eff["target_word"].lower()
+                target = eff.get("target_word")
+                if not target:
+                    continue
+                target = target.lower()
                 probes = self.effect_probes[eff["id"]]
                 if not probes:
                     continue
